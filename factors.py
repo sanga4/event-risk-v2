@@ -125,6 +125,24 @@ for r in seed("gics_sector_links.csv") if (SEEDS / "gics_sector_links.csv").exis
     assert r["sector_code"] in SECTORS, f"gics_sector_links.csv: unknown sector {r['sector_code']}"
     SECTOR_LINKS[r["question_id"]][r["sector_code"]] = dict(sign=int(r["sign"]), strength=int(r["strength"]), rationale=r["rationale"])
 
+def sector_links(g):
+    """SECTOR_LINKS plus, by rule, every company question (graph_build: earnings / KPI markets, a
+    question -> issuer `about` edge) linked to its issuer's GICS sector, signed by what YES means for
+    the issuer. The LLM row wins where both exist. {question id: {sector code: link}}, link source
+    llm | rule."""
+    code = {s["name"]: c for c, s in SECTORS.items()}
+    out = defaultdict(dict, {q: {c: dict(l, source="llm") for c, l in cs.items()} for q, cs in SECTOR_LINKS.items()})
+    for q, n in g.nodes.items():
+        if n["type"] != "question": continue
+        for e in g.out[q]:
+            if e["type"] != "about" or e["dst"] not in g.nodes: continue
+            iss = g.nodes[e["dst"]]
+            c = code.get(iss["attrs"].get("sector"))
+            if c and c not in out[q]:
+                out[q][c] = dict(sign=int(e["sign"] or 0), strength=2, source="rule",
+                                 rationale=f"Company market about {iss['name']}, a {iss['attrs']['sector']} company")
+    return out
+
 LINKS = []  # factor -> factor transmission: (src, dst, sign, rationale)
 for r in seed("factor_links.csv"):
     assert r["src"] in CATALOG and r["dst"] in CATALOG, f"factor_links.csv: unknown factor in {r['src']} -> {r['dst']}"

@@ -207,3 +207,24 @@ def test_existing_endpoints(client):
     assert client.get("/dashboard/issuers").status_code == 200 and client.get("/dashboard/factors").status_code == 200
     assert client.get("/").status_code == 200
     assert client.get("/gics", params=dict(rank="nope")).status_code == 422
+
+# ── memory: compact security-beta rows, caches don't keep old graphs alive ─────────────────────
+def test_secbeta_row_reads_like_the_old_dict():
+    import api
+    r = ("q:1", "XLK", "sector", 0.4, '{"brent": 0.2}', 3, 1.5, 0.7, 0.3, 1.1, 0.5, "%", '[{"day": "2026-01-02", "dp": 0.1}]')
+    b = api.SecBeta(r)
+    assert b["shrunk"] == 1.1 and b["source"] == "sector" and b.get("implied_factors") == {"brent": 0.2}
+    assert b["events"] == [{"day": "2026-01-02", "dp": 0.1}] and b.get("nope", 7) == 7
+    assert api.SecBeta(r[:4] + (None,) + r[5:12] + (None,))["events"] == []
+    assert api.sec_sensitivity(b, 0.5)["per_10pts"] == 0.11
+    with pytest.raises(AttributeError): b.shrunk = 2
+
+def test_caches_release_old_graphs(client):
+    import api, gc, weakref
+    client.get("/gics"); client.get("/dashboard/movers")
+    old = weakref.ref(api._current["graph"])
+    api._current["graph"] = None
+    api.graph(api.connection().cursor())   # reload, as the background refresh does
+    gc.collect()
+    assert old() is None, "a cache still holds the previous graph"
+    assert client.get("/gics").status_code == 200 and client.get("/dashboard/movers").status_code == 200

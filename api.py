@@ -57,7 +57,7 @@ Deadline ladders are also a term structure (ladders.py): `/questions/{id}/curve`
 probability per period, conditional on not before (a hazard rate), and P(event by any date).
 Resolved markets (market_resolutions) give `/calibration`: how often a price of p came true.
 """
-import json, math, os, threading, time
+import json, math, os, sys, threading, time, weakref
 from contextlib import asynccontextmanager
 from collections import defaultdict, deque
 from datetime import date, datetime, timedelta, timezone
@@ -186,6 +186,11 @@ class Graph:
         every path issuer <- exposure - entity [<- link -> entity] <- involves - question.
         A path = dict(strength, sign, channel, role, nodes); sign None = direction unknown."""
         paths = defaultdict(list)
+        for x in self.inc[sec]:   # company markets about the issuer itself (earnings, KPIs): one direct path
+            if x["type"] == "about" and (x["weight"] or 0) > 0:
+                a = x["attrs"] or {}
+                paths[x["src"]].append(dict(strength=x["weight"], sign=x["sign"], channel=a.get("channel"), role="company",
+                                            nodes=[x["src"], sec]))
         for x in self.inc[sec]:
             if x["type"] != "exposure": continue
             held, responds = x["src"], (x["attrs"] or {}).get("channel_signs") or {}
@@ -263,15 +268,31 @@ def load_loadings(cur):
 
 SEC_BETA_COLS = ("question_id", "ticker", "source", "implied", "implied_factors", "n_events", "beta", "se", "tau", "shrunk", "shrunk_se", "units", "events")
 
+class SecBeta:
+    """One security_betas row, read like a dict (row["shrunk"], row.get("implied_factors")). Compact:
+    the latest run has ~240k rows, and as dicts with their JSON decoded they took ~700 MB of the API's
+    memory (measured 2026-10-30), held twice during each graph refresh. The JSON columns (events,
+    implied_factors) stay as text and are decoded on each read — only the few rows a request shows."""
+    __slots__ = SEC_BETA_COLS
+    JSON = {"implied_factors": "{}", "events": "[]"}
+    def __init__(self, row):
+        for k, v in zip(SEC_BETA_COLS, row):
+            object.__setattr__(self, k, sys.intern(v) if k in ("question_id", "ticker", "source", "units") and v else v)
+    def __getitem__(self, k):
+        v = getattr(self, k)
+        return json.loads(v or self.JSON[k]) if k in self.JSON else v
+    def get(self, k, default=None):
+        return self[k] if k in SEC_BETA_COLS else default
+    def __setattr__(self, k, v): raise AttributeError("read-only")
+
 def load_sec_betas(cur):
-    """{(question id, ticker): row} from the latest security_betas run."""
+    """{(question id, ticker): SecBeta row} from the latest security_betas run."""
     try:
         rows = cur.execute(f"""SELECT question_id, ticker, source, implied, implied_factors::VARCHAR, n_events, beta, se, tau, shrunk,
                                       shrunk_se, units, events::VARCHAR FROM security_betas WHERE {latest_run('security_betas')}""").fetchall()
     except duckdb.Error:
         return {}
-    return {(r[0], r[1]): dict(zip(SEC_BETA_COLS, r)) | dict(implied_factors=json.loads(r[4] or "{}"), events=json.loads(r[12] or "[]"))
-            for r in rows}
+    return {(r[0], r[1]): SecBeta(r) for r in rows}
 
 EVENT_COLS = ("question_id", "rank", "n_evaluated", "n_live", "n_events", "beta", "se", "q", "tau", "shrunk", "shrunk_se", "units")
 
@@ -523,6 +544,8 @@ def get_question(question_id: str, cur=Depends(db)):
                 entities=entity_links(g, question_id), factors=factor_view(g, question_id, prob),
                 industries=question_industries(g, question_id),
                 affects=[dict(**g.ref(e["dst"]), sign=e["sign"], rationale=e["note"]) for e in g.out[question_id] if e["type"] == "affects"],
+                companies=[dict(**g.ref(e["dst"]), sign=e["sign"], channel=(e["attrs"] or {}).get("channel"), market=e["note"])
+                           for e in g.out[question_id] if e["type"] == "about"],
                 securities=[dict(**g.ref(f"sec:{t}"), ticker=t, issuer=issuer_of(g, f"sec:{t}"), sensitivity=sec_sensitivity(b, prob))
                             for t, b in secs])
 
@@ -1132,7 +1155,13 @@ def repricing(m, row):
 # Which questions concern a sector is an LLM judgment (factors.SECTOR_LINKS); how much each moves
 # it is measured (security_betas.py: the question vs the sector's SPDR ETF).
 GICS_CHANGES = {"change_1w": timedelta(days=7), "change_1m": timedelta(days=30)}
-_gics_cache = {"graph": None, "at": 0.0, "rows": None}
+_gics_cache = {"graph": lambda: None, "at": 0.0, "rows": None}   # graph: a weak reference (cached_for)
+
+def cached_for(cache, g):
+    """Whether `cache` holds rows computed for graph g within GRAPH_TTL. Caches keep only a weak
+    reference to their graph: a strong one kept the previous graph (~1.3 GB) alive after every
+    background refresh until the dashboard was next opened (measured 2026-10-30)."""
+    return cache["graph"]() is g and time.monotonic() - cache["at"] < GRAPH_TTL
 
 def props_at(cur, g, pids, at):
     """{pid: blended probability at `at`} from the database (the latest price within 7 days before)."""
@@ -1180,16 +1209,17 @@ def lead_factor(g, qid, etf, sb, prob):
 def gics_rows(cur, g, at):
     """{sector code: [row]} for every live question linked to the sector, ranked: measured first by
     |move of the sector ETF per +1.0 of probability|, then unmeasured by LLM strength and volume."""
-    if _gics_cache["graph"] is g and time.monotonic() - _gics_cache["at"] < GRAPH_TTL:
+    if cached_for(_gics_cache, g):
         return _gics_cache["rows"]
-    qids = [q for q in factors.SECTOR_LINKS if (g.nodes.get(q) or {}).get("type") == "question"]
+    links = factors.sector_links(g)
+    qids = [q for q in links if (g.nodes.get(q) or {}).get("type") == "question"]
     qp = question_probs(cur, g, qids, at)
     live = [q for q in qids if qp[q]["status"] == "live"]
     qp, ch = with_changes(cur, g, live, at)
     out = {c: [] for c in factors.SECTORS}
     for q in live:
         v, changes = qp[q], ch[q]
-        for c, link in factors.SECTOR_LINKS[q].items():
+        for c, link in links[q].items():
             etf = factors.SECTORS[c]["etf"]
             sb = g.sec_betas.get((q, etf))
             sens = sec_sensitivity(sb, v["prob"]) if sb else None
@@ -1200,7 +1230,7 @@ def gics_rows(cur, g, at):
     for rows in out.values():
         rows.sort(key=lambda r: (r["sector_move"] is None, -abs((r["sector_move"] or {}).get("beta") or 0),
                                  -r["llm"]["strength"], -(r["volume_24h"] or 0)))
-    _gics_cache.update(graph=g, at=time.monotonic(), rows=out)
+    _gics_cache.update(graph=weakref.ref(g), at=time.monotonic(), rows=out)
     return out
 
 def gics_sector(g, code, rows, limit, rank="sensitivity"):
@@ -1427,18 +1457,18 @@ def dashboard_factor(factor_id: str, limit: int = Query(20, ge=1, le=50), rank: 
                 linked=rank_rows(linked, rank, measure)[:limit])
 
 # ── Biggest Movers: every live question, ranked by its probability move ─────────────────────
-_movers_cache = {"graph": None, "at": 0.0, "rows": None}
+_movers_cache = {"graph": lambda: None, "at": 0.0, "rows": None}
 
 def mover_rows(cur, g, at):
     """Every live question in the graph (one row per question, its headline rung's probability and
     24h / 1w / 1m changes), by 24h volume; cached per graph for GRAPH_TTL."""
-    if _movers_cache["graph"] is g and time.monotonic() - _movers_cache["at"] < GRAPH_TTL:
+    if cached_for(_movers_cache, g):
         return _movers_cache["rows"]
     qids = [i for i, n in g.nodes.items() if n["type"] == "question"]
     live = [q for q, v in question_probs(cur, g, qids, at).items() if v["status"] == "live"]
     qp, ch = with_changes(cur, g, live, at)
     rows = sorted((dict(question_summary(g, q, qp), **ch[q]) for q in live), key=lambda r: (-(r["volume_24h"] or 0), r["id"]))
-    _movers_cache.update(graph=g, at=time.monotonic(), rows=rows)
+    _movers_cache.update(graph=weakref.ref(g), at=time.monotonic(), rows=rows)
     return rows
 
 @app.get("/dashboard/movers")

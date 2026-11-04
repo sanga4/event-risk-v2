@@ -132,19 +132,21 @@ def ranked(rows, live, keep, n_evaluated=None):
 def issuer_channels(g):
     """{issuer id: {question: [channel]}}: the economic reasons a question could move an issuer, other
     than measured factor moves (added per pair): an entity path (Graph.exposures_of, score >=
-    MIN_STRUCTURAL_SCORE), the issuer's GICS sector in the LLM sector links, a curated issuer link."""
+    MIN_STRUCTURAL_SCORE; "company" when the question is a company market about the issuer itself),
+    the issuer's GICS sector (LLM sector links, plus company markets' own sectors), a curated issuer link."""
     code = {s["name"]: c for c, s in factors.SECTORS.items()}
     with open(Path(__file__).parent / "issuers.csv") as f:
         sector = {r["issuer_id"]: code.get(r["sector"]) for r in csv.DictReader(f)}
     by_sector = defaultdict(list)
-    for q, cs in factors.SECTOR_LINKS.items():
+    for q, cs in factors.sector_links(g).items():
         for c in cs: by_sector[c].append(q)
     out = defaultdict(lambda: defaultdict(list))
     for iid, c in sector.items():
         for q in by_sector.get(c, ()): out[iid][q].append("sector")
         if f"iss:{iid}" in g.nodes:
+            about = {e["src"] for e in g.inc[f"iss:{iid}"] if e["type"] == "about"}   # company markets about it
             for q, v in g.exposures_of(f"iss:{iid}").items():
-                if v["score"] >= MIN_STRUCTURAL_SCORE: out[iid][q].append("entity")
+                if v["score"] >= MIN_STRUCTURAL_SCORE: out[iid][q].append("company" if q in about else "entity")
     for r in factors.QUESTION_LINKS:
         if r["target_type"] == "issuer": out[r["target_id"]][r["question_id"]].append("analyst")
     return out

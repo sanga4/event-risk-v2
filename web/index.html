@@ -94,7 +94,7 @@
   nav button { border: 0; background: none; color: var(--ink-2); padding: 6px 10px; border-radius: 6px; cursor: pointer; }
   nav button[aria-selected="true"] { color: var(--ink); font-weight: 600; background: var(--hover); }
   header h1 { margin: 0 12px 0 0; user-select: none; }
-  body:not(.unlocked) nav button.secret { display: none; }
+  /* all nav tabs are visible */
   body.about main, body.about .explore-only { display: none; }
   #about { display: none; overflow: auto; }
   body.about #about { display: block; }
@@ -250,13 +250,13 @@
   <h1>Event Risk Graph</h1>
   <nav role="tablist">
     <button role="tab" data-view="explore" aria-selected="true">Explore</button>
-    <button role="tab" data-view="about" class="secret">How it works</button>
-    <button role="tab" data-view="api" class="secret">Excel &amp; API</button>
-    <button role="tab" data-view="movers" class="secret">Biggest Movers</button>
-    <button role="tab" data-view="gics" class="secret">GICS Dashboard</button>
-    <button role="tab" data-view="issuers" class="secret">Issuer Dashboard</button>
-    <button role="tab" data-view="macro" class="secret">Macro Dashboard</button>
-    <button role="tab" data-view="research" class="secret">Factor research</button>
+    <button role="tab" data-view="about">How it works</button>
+    <button role="tab" data-view="api">Excel &amp; API</button>
+    <button role="tab" data-view="movers">Biggest Movers</button>
+    <button role="tab" data-view="gics">GICS Dashboard</button>
+    <button role="tab" data-view="issuers">Issuer Dashboard</button>
+    <button role="tab" data-view="macro">Macro Dashboard</button>
+    <button role="tab" data-view="research">Factor research</button>
   </nav>
   <label class="explore-only">Depth <select id="depth"><option selected>1</option><option>2</option></select></label>
 </header>
@@ -1187,19 +1187,6 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   if (b.dataset.view === "macro") MacroBoard.open();
   if (b.dataset.view === "explore") network.redraw();
 });
-// hidden views: five quick clicks on the title toggles them (remembered per browser)
-document.body.classList.toggle("unlocked", localStorage.getItem("unlocked") === "1");
-let titleClicks = [];
-$("header h1").addEventListener("click", () => {
-  const now = Date.now();
-  titleClicks = titleClicks.filter(t => now - t < 1500).concat(now);
-  if (titleClicks.length < 5) return;
-  titleClicks = [];
-  const on = !document.body.classList.contains("unlocked");
-  document.body.classList.toggle("unlocked", on);
-  localStorage.setItem("unlocked", on ? "1" : "0");
-  if (!on) document.querySelector('nav button[data-view="explore"]').click();
-});
 // links like <a data-open="api"> switch to that top-level view
 document.addEventListener("click", e => {
   const a = e.target.closest("[data-open]");
@@ -1769,7 +1756,7 @@ const Gics = (() => {
         <tbody>${s.events.map((e, i) => `<tr data-code="${esc(s.code)}" data-id="${esc(e.id)}" ${st.sel && st.sel.code === s.code && st.sel.id === e.id ? 'aria-current="true"' : ""}>
           <td class="rank">${i + 1}</td><td title="${esc(e.name)}">${esc(e.name)}</td><td>${pct(e.prob)}</td>
           <td>${pts(e.change_24h)}</td><td>${pts(e.change_1w)}</td><td>${pts(e.change_1m)}</td>
-          ${e.sector_move ? `<td><b>${sgn(e.sector_move.per_10pts, 2)}%</b></td>` : `<td class="unmeasured" title="Not measured yet: LLM says YES ${e.llm.sign > 0 ? "lifts" : e.llm.sign < 0 ? "hurts" : "has an unclear effect on"} the sector">${e.llm.sign > 0 ? "▲" : e.llm.sign < 0 ? "▼" : "•"} n/m</td>`}
+          ${e.sector_move ? `<td><b>${sgn(e.sector_move.per_10pts, 2)}%</b></td>` : `<td class="unmeasured" title="Not measured yet: ${e.llm.source === "rule" ? "by rule (company market)" : "LLM says"} YES ${e.llm.sign > 0 ? "lifts" : e.llm.sign < 0 ? "hurts" : "has an unclear effect on"} the sector">${e.llm.sign > 0 ? "▲" : e.llm.sign < 0 ? "▼" : "•"} n/m</td>`}
           ${col ? `<td>${col[2](e, e.sector_move, "%", 2)}</td>` : ""}</tr>`).join("")}</tbody></table>`
         : '<p class="gx-empty">No live events linked to this sector.</p>'}</section>`;
   }
@@ -1790,7 +1777,7 @@ const Gics = (() => {
     const m = e.sector_move;
     D().innerHTML = `${EvUI.eventHead(`${s.name} · event`, e)}
       <h3>Effect on ${esc(s.name)} (${esc(s.etf)})</h3>
-      <div class="row"><b>If YES the sector ${dir(e.llm.sign)}</b> ${ev("qualitative", "LLM judgment pass (seeds/gics_sector_links.csv); not measured")}
+      <div class="row"><b>If YES the sector ${dir(e.llm.sign)}</b> ${e.llm.source === "rule" ? '<span class="tag" title="A company market (earnings or KPI) about an issuer in this sector; not measured">rule: company market</span>' : ev("qualitative", "LLM judgment pass (seeds/gics_sector_links.csv); not measured")}
         <div class="meta">${esc(STRENGTH[e.llm.strength] || "")} link — ${esc(e.llm.rationale)}</div></div>
       ${m ? `<div class="row">${ev("estimated", EST)}${EvUI.moveTiles(m, s.etf)}
         <div class="meta">${m.agrees_with_llm == null ? "" : m.agrees_with_llm ? "Measured direction agrees with the LLM's. " : "<b>Measured direction disagrees with the LLM's.</b> "}Found by ${esc(m.found_by)}; shrunk toward the factor-implied move${m.n_events ? "" : " (no jump days: implied only)"}.${e.repricing_24h != null ? ` Estimated 24h repricing ${sgn(e.repricing_24h, 2)}% (beta × the 24h probability change; not an observed return).` : ""}</div></div>`
@@ -1890,7 +1877,7 @@ const IssuerBoard = Board({
   detail: id => `/dashboard/issuers/${encodeURIComponent(id)}`, events: d => d.events, part: (d, p) => p === "main" ? d.events : d.statistical,
   move: e => e.move, unit: () => "%", digits: 2, whyHead: "Channel",
   moveHead: d => `${(d.security || {}).ticker || "Stock"} /10 pts`, moveTitle: d => `${(d.security || {}).ticker || "The stock"}'s % move per +10 pts of the event's probability (measured, shrunk)`,
-  why: e => esc(e.move.channels.length ? e.move.channels.map(c => ({ factors: "factors", entity: "entity path", sector: "sector", analyst: "analyst" })[c] || c).join(" · ") : `stat. only · ${EvUI.qtxt(e.move.q)}`),
+  why: e => esc(e.move.channels.length ? e.move.channels.map(c => ({ factors: "factors", entity: "entity path", sector: "sector", analyst: "analyst", company: "company market" })[c] || c).join(" · ") : `stat. only · ${EvUI.qtxt(e.move.q)}`),
   head: d => { const i = d.issuer, s = d.security || {}, c = d.coverage;
     return `<div class="bd-head"><h3>${esc(i.name)} <span class="tag">${esc(s.ticker || "no security")}</span></h3>
       <div class="gx-sub">${esc(i.sector || "")}${i.sub_industry ? ` · ${esc(i.sub_industry)}` : ""}${i.country ? ` · ${esc(i.country)}` : ""}${i.index ? ` · ${esc(i.index)}` : ""}${d.market_beta != null ? ` · market beta ${EvUI.fmt(d.market_beta, 2)}` : ""}</div>
@@ -2009,6 +1996,7 @@ const Movers = (() => {
     D().innerHTML = `${head}
       <div class="rs-actions"><button type="button" data-ev-explore="${esc(id)}">Open event in Explore</button></div>
       <h3>Contracts (${c.contracts.length} live)</h3>${contracts(c.contracts)}
+      ${q.companies && q.companies.length ? `<h3>Companies</h3><div class="meta">${q.companies.map(x => `${esc(x.name)} <span class="muted">(YES ${x.sign > 0 ? "good" : x.sign < 0 ? "bad" : "unclear"} for it · ${esc(x.channel || "")} · rule)</span>`).join(" · ")}</div>` : ""}
       <h3>Entities</h3>${q.entities.length ? `<div class="meta">${q.entities.map(x => `${esc(x.name)}${x.role ? ` <span class="muted">(${esc(x.role)})</span>` : ""}`).join(" · ")}</div>` : '<p class="note">No entities linked.</p>'}
       <h3>Financial factors</h3>${factorRows(q.factors)}
       <h3>Securities</h3>${securityRows(q.securities)}

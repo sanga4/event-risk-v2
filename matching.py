@@ -118,6 +118,21 @@ ACTIONS = [(a, FAMILY.get(a, a), k, s, re.compile(p, re.I)) for a, k, s, p in [
      r"\bappointed\b|\bnominee\b|confirmed as|\bbe (?:the )?(?:next |first )?(?:minister|prime minister|president|"
      r"chancellor|head of|leader|commander|chair|vice|secretary|speaker|governor|supreme leader|ceo)"),
 ]]
+# Company markets (earnings and company KPIs: graph_build's company sources) are read with this
+# vocabulary first, then ACTIONS; other markets never see it, so "tariff revenue" stays a tariff.
+COMPANY_ACTIONS = [(a, a, k, False, re.compile(p, re.I)) for a, k, p in [
+    ("earnings_beat", "measure", r"\bbeat\b.*\bearnings\b|earnings (?:beat|surprise)|\bEPS\b|earnings per share"),
+    ("acquisition", "occurrence", r"\bacquir|\bacquisition|\bmerger\b|\bbuyout\b"),
+    ("ipo", "occurrence", r"\bIPO\b|\bgo(?:es|ing)? public\b|\btake \w+ public\b"),
+    ("layoffs", "occurrence", r"\blayoffs?\b|\blay off"),
+    ("company_metric", "measure",
+     r"revenue|\bsales\b|deliver(?:s|y|ies|ed)?\b|\busers\b|subscribers|shipments|\bvolume\b|\bmargin\b|\bgrowth\b"
+     r"|transactions|cardholders|headcount|passengers|\bfares?\b|\brides\b|\btrips\b|impressions|\bGMV\b"
+     r"|gross merchandise|\bcapex\b|capital expenditures?|RevPAR|\bproduc(?:e|es|tion)\b|restaurants|\bstores\b"
+     r"|berth days|\bunits?\b|\bearnings\b|guidance|\bprofit|\bincome\b|bookings|backlog|market share"
+     r"|\breports? \S+ |customers|\bseats\b|daily active|\bcount\b|\bratio\b|\bMBR\b"),
+]]
+COMPANY_REGEX = re.compile("|".join(rx.pattern for a, _, _, _, rx in COMPANY_ACTIONS if a != "acquisition"), re.I)
 RACE = re.compile(r"\bnext\b|first listed|first to\b", re.I)
 PRICE_TOLERANCE = 0.10
 
@@ -174,9 +189,15 @@ EFFECTS = {
     "appear_together": ("diplomacy",   0.15, +1, +1),
     "visit":           ("diplomacy",   0.2, +1, +1),
     "recognize":       ("diplomacy",   0.3, +1, 0),
+    # company markets: what YES means for the company itself (company_effect)
+    "earnings_beat":   ("earnings",    0.6, +1, +1),     # beats the consensus estimate
+    "company_metric":  ("earnings",    0.5, +1, +1),     # YES = the KPI above its threshold (more = better)
+    "acquisition":     ("corporate",   0.5, +1, 0),      # the acquired company gets a premium
+    "ipo":             ("corporate",   0.3, 0, 0),
+    "layoffs":         ("corporate",   0.3, 0, 0),
 }
 UNKNOWN_EFFECT = (None, 0.3, 0, 0)   # unparsed or unlisted actions: some relevance, no direction
-FLIP_BELOW = {"tariff_rate", "transit"}
+FLIP_BELOW = {"tariff_rate", "transit", "company_metric"}
 RELIEF = {"sanction_relief", "unban", "list_remove"}  # "lift" is already part of these actions  # measures whose YES flips meaning with a "below" threshold
 ROLE_WEIGHT = {"target": 1.0, "actor": 0.6, "party": 1.0, "concept": 0.8}
 
@@ -193,6 +214,30 @@ def effect(sig, entity_id):
             else "party" if sig.symmetric or not sig.targets else "actor")
     polarity = on_actor if role == "actor" else on_target
     return role, channel, round(severity * ROLE_WEIGHT[role], 3), (float(polarity) if polarity else None)
+
+# Company KPIs where more is worse for the company (cost and loss ratios), or of no clear direction
+# (headcount): company_effect flips or drops the "more = better" default for these.
+COST_METRIC = re.compile(r"\bratio\b|\bMBR\b|medical (?:benefit|loss|care)|\bcosts?\b|expenses?|\bchurn\b|\blosses\b", re.I)
+UNCLEAR_METRIC = re.compile(r"headcount|employees|\bstaff\b", re.I)
+RANGE = re.compile(r"-?\d[\d,.]*%?\s*(?:to|-|–)\s*-?\d[\d,.]*%?", re.I)
+BELOW = re.compile(r"\b(?:below|under|less than|fewer than|lower than)\b|(?:^|\s)<\s*-?\d", re.I)
+
+def company_effect(sig, question=""):
+    """(channel, weight, sign) of a company market's YES outcome for the company it is about: the
+    action's target polarity (more of a KPI = better, except cost / loss ratios; headcount has no
+    direction), flipped for "below" thresholds and negations; no direction for a range ("between X
+    and Y", "1.5% to 2%") or an unknown action. `question` = the market's question text."""
+    channel, severity, polarity, _ = EFFECTS.get(sig.action, UNKNOWN_EFFECT)
+    op = sig.threshold[0] if sig.threshold else None
+    if sig.action == "company_metric":
+        if UNCLEAR_METRIC.search(question): polarity = 0
+        elif COST_METRIC.search(question): polarity = -polarity
+        if op is None and BELOW.search(question): op = "<"   # "below -4.5%": the parser skips negative numbers
+        if op not in ("<", "<=") and RANGE.search(re.sub(r"\([^)]*\)", " ", question)): op = "between"
+    if op == "between": polarity = 0
+    if sig.action in FLIP_BELOW and op in ("<", "<="): polarity = -polarity
+    if sig.negated: polarity = -polarity
+    return channel or "corporate", severity, float(polarity) if polarity else None
 
 # Qualifying conditions read from the full rules text. Any difference => near_equivalent.
 CONDITIONS = {c: re.compile(p, re.I) for c, p in {
@@ -324,11 +369,12 @@ def parse_threshold(m, question):
 # Read from the question only: rules text mentions rates, defaults and bailouts in passing.
 QUESTION_ONLY = {"default", "imf_program", "policy_rate", "shutdown"}
 
-def find_action(question, head):
+def find_action(question, head, company=False):
     """(action, family, kind, symmetric, verb match). The question wins over the rules; the verb's
-    position (question only) splits entities into actors and targets."""
+    position (question only) splits entities into actors and targets. Company markets try
+    COMPANY_ACTIONS first."""
     for src in (question, head):
-        for a, f, k, s, rx in ACTIONS:
+        for a, f, k, s, rx in (COMPANY_ACTIONS + ACTIONS if company else ACTIONS):
             if src is not question and a in QUESTION_ONLY: continue
             if verb := rx.search(src):
                 return a, f, k, s, verb if src is question else None
@@ -365,7 +411,7 @@ def parse(m, mentions):
     head = operative(rules)
     issues = []
 
-    action = find_action(question, head)
+    action = find_action(question, head, company=bool(m.get("company")))
     if not action: issues.append("no recognised action")
     name, family, kind, symmetric, verb = action or (None, None, None, False, None)
     if kind and RACE.search(question + " " + head): kind = "race"

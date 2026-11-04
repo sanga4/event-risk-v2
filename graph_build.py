@@ -91,7 +91,8 @@ HOME = "Q30"  # United States: involving only the US is domestic politics
 # provincial and mayoral races) — and every candidate must still pass scope().
 GRAPH_SOURCES = dict(kalshi_core={"World", "Politics"}, kalshi_scoped={"Elections", "Economics", "Science and Technology"},
                      poly_core={"geopolitics"},
-                     poly_scoped={"world", "world-elections", "tariffs", "fed-rates", "economic-policy", "ai", "compute", "ai-regulation"})
+                     poly_scoped={"world", "world-elections", "tariffs", "fed-rates", "economic-policy", "ai", "compute", "ai-regulation"},
+                     kalshi_company={"Companies"}, poly_company={"earnings", "kpis"})
 SCOPED_MIN_VOLUME = 25000  # $ lifetime volume across the event
 # Policy topics that move credit and rates: in scope even when only the US is involved.
 POLICY_REGEX = re.compile(r"fed(?:eral)? funds|\bFOMC\b|\bFed\b.*\brates?\b|\brate (?:cut|hike)s?\b|\bFed decision"
@@ -102,6 +103,60 @@ POLICY_REGEX = re.compile(r"fed(?:eral)? funds|\bFOMC\b|\bFed\b.*\brates?\b|\bra
 # scoped sources for them.
 THEME_REGEX = re.compile(r"data ?cent(?:er|re)s?|datacenter|hyperscal|\bAI[- ]chips?\b|chip exports?|export controls?"
                          r"|semiconductor|\bGPUs?\b|\bHBM\b|stargate|\bAI (?:infrastructure|compute|capex|moratorium|preemption)", re.I)
+# Company markets (decision 2026-10-30, by request): earnings ("Will Roku (ROKU) beat quarterly
+# earnings?") and company KPIs ("Tesla deliveries in 2026", "Spotify monthly active users") from the
+# company sources, no volume floor. In scope when they name an issuer (company_issuers) or ask about
+# earnings or a KPI (matching.COMPANY_REGEX); each question links to the issuers it names (`about`).
+SUFFIXES = re.compile(r"\s*\((?:the)\)|,?\s+(?:inc\.?|incorporated|corporation|corp\.?|company|co\.?|plc|ltd\.?|limited|holdings?"
+                      r"|group|international|platforms|markets|n\.v\.|s\.a\.|se|ag)$", re.I)
+GENERIC_FIRST = set("""american general united first public digital global national western southern eastern northern
+    equity realty capital universal federal regency simon host live match ball arch dollar international energy
+    the texas royal best boston old essex extra healthpeak kinder advanced applied analog automatic bank brown cardinal
+    church citizens comfort consolidated cooper crown edison expand fair fifth genuine globe henry home illinois
+    interactive intercontinental invitation iron jack martin morgan news packaging palo parker philip phillips pinnacle
+    principal progressive quest ralph raymond regions republic ross stanley state steel taiwan thermo tokyo tractor
+    union arthur baker block bloom bristol archer mid-america monolithic norwegian hewlett ingersoll keurig kraft
+    marathon marsh becton mettler procter lockheed northrop norfolk estée alexandria alliant atmos avery camden
+    centerpoint coherent corpay everest erie fidelity franklin hartford hubbell idexx insulet jacobs loews
+    microchip motorola omnicom prudential rockwell smurfit synchrony teledyne travelers trimble tyler""".split())
+
+def issuer_aliases():
+    """{alias: issuer id} for matching company markets to issuers.csv: each name without its legal
+    suffix ("Ford Motor Company" -> "Ford Motor"), and its first word when that is distinctive
+    ("Ford", "Chipotle", "Meta"); aliases shared by two issuers are dropped."""
+    seen = defaultdict(set)
+    with open(ROOT / "issuers.csv") as f:
+        for r in csv.DictReader(f):
+            name = r["name"].replace("|", "").strip()
+            while (short := SUFFIXES.sub("", name)) != name and short.lower() not in GENERIC_FIRST: name = short
+            forms = {name}
+            first = name.split()[0].rstrip(",.")
+            if len(name.split()) > 1 and len(first) >= 4 and first.lower() not in GENERIC_FIRST: forms.add(first)
+            for x in forms: seen[x].add(r["issuer_id"])
+    return {a: next(iter(ids)) for a, ids in seen.items() if len(ids) == 1}
+
+def issuer_tickers():
+    with open(ROOT / "securities.csv") as f:
+        return {r["ticker"]: r["issuer_id"] for r in csv.DictReader(f) if r["issuer_id"]}
+
+ALIASES, TICKERS = issuer_aliases(), issuer_tickers()
+ALIAS_REGEX = re.compile(r"\b(" + "|".join(sorted(map(re.escape, ALIASES), key=len, reverse=True)) + r")(?![\w-])")
+KALSHI_KPI_SERIES = re.compile(r"\bKX([A-Z]{1,5})A\b")   # Kalshi annual KPI series: KXTSLAA = TSLA
+
+def company_issuers(text):
+    """Issuer ids a company market is about, from its text (series id, event title, title, outcome):
+    a ticker in parentheses ("Roku (ROKU)"), a Kalshi KPI series ticker (KXTSLAA), or an issuer name
+    (case-sensitive, whole word)."""
+    text = text or ""
+    found = [TICKERS[t] for t in re.findall(r"\(([A-Z][A-Z.]{0,5})\)", text) if t in TICKERS]
+    found += [TICKERS[t] for t in KALSHI_KPI_SERIES.findall(text) if t in TICKERS]
+    found += [ALIASES[a] for a in ALIAS_REGEX.findall(text)]
+    return list(dict.fromkeys(found))
+
+def company_source(tags):
+    """Whether a market's venue tags (Kalshi category / Polymarket slugs) are a company source."""
+    return bool(set(tags or ()) & (GRAPH_SOURCES["kalshi_company"] | GRAPH_SOURCES["poly_company"]))
+
 PRICE_LOOKUP_BATCH = 5000  # (market, time) requests per query; one huge ASOF join times out on MotherDuck
 REFRESH_KINDS = {"wikidata": {"entity"}, "relatedness": {"mentions", "comentions", "df"}}  # wiki_cache kinds
 
@@ -142,17 +197,20 @@ CANDIDATE_SQL = """(venue = 'kalshi' AND (tags IS NULL OR list_has_any(from_json
 
 def source_params():
     g = GRAPH_SOURCES
-    return dict(kc=sorted(g["kalshi_core"] | g["kalshi_scoped"]), pc=sorted(g["poly_core"] | g["poly_scoped"]),
+    return dict(kc=sorted(g["kalshi_core"] | g["kalshi_scoped"] | g["kalshi_company"]),
+                pc=sorted(g["poly_core"] | g["poly_scoped"] | g["poly_company"]),
                 tm=sorted(f"{v}:{m}" for v, m in THEME_MARKETS))
 THEMED_SQL = "venue || ':' || market_id IN (SELECT unnest($tm::VARCHAR[]))"
 
 def source_class(m):
-    """core | scoped | None for a market, from its venue tags (GRAPH_SOURCES)."""
+    """core | scoped | company | None for a market, from its venue tags (GRAPH_SOURCES)."""
     tags = set(json.loads(m["tags"])) if m["tags"] else None
     g = GRAPH_SOURCES
     if m["venue"] == "kalshi":
-        return "core" if tags is None or tags & g["kalshi_core"] else "scoped" if tags & g["kalshi_scoped"] else None
-    return "core" if tags and tags & g["poly_core"] else "scoped" if tags and tags & g["poly_scoped"] else None
+        return ("core" if tags is None or tags & g["kalshi_core"] else "scoped" if tags & g["kalshi_scoped"]
+                else "company" if tags & g["kalshi_company"] else None)
+    return ("core" if tags and tags & g["poly_core"] else "scoped" if tags and tags & g["poly_scoped"]
+            else "company" if tags and tags & g["poly_company"] else None)
 
 def load_markets(con):
     """Latest terms of candidate markets (GRAPH_SOURCES; geopolitical scope is decided after entity
@@ -188,6 +246,7 @@ def load_markets(con):
         for k in ("open_time", "close_time", "first_seen_at", "listed_at", "priced_at"):
             m[k] = utc(m[k])
         m["text"] = " ".join(str(m[k]) for k in ("series_id", "event_title", "title", "subtitle", "tags") if m[k])
+        m["company"] = cls == "company"   # read with the company vocabulary (matching.COMPANY_ACTIONS)
         if themed or not EXCLUDE_REGEX.search(m["text"]):
             out.append(m)
     return out
@@ -235,12 +294,17 @@ def geopolitical(key, actors, ents):
     domestic)."""
     return any((cs := entities.countries_of(a[3:], ents)) and HOME not in cs for a in actors)
 
-def scope(texts, tags=None):
+def scope(texts, tags=None, full=None):
     """in_scope(key, actor ids, ents) for entities.discover over {key: text}: Polymarket's
-    geopolitics tag, a policy topic (POLICY_REGEX) in the text, or a foreign state actor.
-    tags = {key: [tag slugs]}; without it every Polymarket market counts as tagged (callers that
-    only sweep the geopolitics tag)."""
+    geopolitics tag, a policy topic (POLICY_REGEX) in the text, or a foreign state actor; or, for
+    a company source, a named issuer or an earnings / KPI question (company_issuers, COMPANY_REGEX).
+    tags = {key: [tag slugs or Kalshi category]}; without it every Polymarket market counts as tagged
+    (callers that only sweep the geopolitics tag). full = {key: longer text with series id and event
+    title} for the company test (default: texts)."""
     def in_scope(key, actors, ents):
+        if tags is not None and company_source(tags.get(key)):
+            text = (full or texts).get(key) or ""
+            return bool(company_issuers(text) or matching.COMPANY_REGEX.search(text))
         if key[0] == "polymarket" and tags is None: return True
         if key[0] == "polymarket" and "geopolitics" in tags.get(key, ()): return True
         if key in THEME_MARKETS: return True   # curated theme links pull their markets in (seeds/theme_links.csv)
@@ -252,10 +316,10 @@ def discover(con, markets):
     """Entities for the geopolitical markets among these (plus entities carrying exposures),
     from Wikipedia / Wikidata. ents.mentions has exactly the in-scope markets."""
     questions = {(m["venue"], m["market_id"]): matching.question_text(m) for m in markets}
-    tags = {(m["venue"], m["market_id"]): json.loads(m["tags"]) if m["tags"] and m["venue"] == "polymarket" else []
+    tags = {(m["venue"], m["market_id"]): json.loads(m["tags"]) if m["tags"] and (m["venue"] == "polymarket" or m["company"]) else []
             for m in markets}
     return entities.build(con, questions, extra_qids={r["qid"] for r in seed("exposures.csv")},
-                          in_scope=scope(questions, tags))
+                          in_scope=scope(questions, tags, {(m["venue"], m["market_id"]): m["text"] for m in markets}))
 
 def in_scope(markets, ents):
     return [m for m in markets if (m["venue"], m["market_id"]) in ents.mentions]
@@ -516,6 +580,19 @@ def build(markets, prices, ents):
                        sign=float(r["sign"]) if int(r["sign"]) else None, confidence=0.5, provenance="curated",
                        note=r["rationale"], role="concept", action=sig.action, channel="theme",
                        strength=int(r["strength"]), basis=r["source"]))
+        # question -> issuer: company markets (earnings, KPIs) about a named issuer, signed by what
+        # YES means for it (matching.company_effect); skipped when the issuer is already an involved
+        # entity (its "issuer itself" exposure carries it)
+        about = {}
+        for p in rungs:
+            for m in sorted(members[p], key=listed):
+                if m.get("company"):
+                    for iid in company_issuers(m["text"]): about.setdefault(iid, m)
+        for iid, m in about.items():
+            channel, weight, sign = matching.company_effect(sig, matching.question_text(m))
+            if f"wd:{iid}" in seen: continue
+            add_e(edge(qid, issuer_node_id(iid), "about", q_start, weight=weight, sign=sign, confidence=0.8,
+                       provenance="rule", note=f"company market: {market_name(m)}", action=sig.action, channel=channel))
 
     # factors, GICS industries and their links (factor_layer)
     citizen_of = defaultdict(list)

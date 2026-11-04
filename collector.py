@@ -54,7 +54,7 @@ POLY_EXCLUDE_TAGS = env_set("POLY_EXCLUDE_TAGS", "sports,esports,games,pop-cultu
 # never share an event with a POLY_KEEP_TAGS tag in practice; the rest are filtered here.
 POLY_SERVER_EXCLUDE = env_set("POLY_SERVER_EXCLUDE", "sports,games,esports")
 POLY_KEEP_TAGS = env_set("POLY_KEEP_TAGS", "politics,geopolitics,world,elections,world-elections,economy,economic-policy,"
-                                           "fed-rates,tariffs,tech,ai,business,science")
+                                           "fed-rates,tariffs,tech,ai,business,science,earnings,kpis")
 KALSHI_REALTIME = env_set("KALSHI_REALTIME", "World,Politics")  # the graph's core sources: snapshotted every run
 POLY_REALTIME = env_set("POLY_REALTIME", "geopolitics")
 SNAPSHOT_REALTIME_VOLUME = float(os.getenv("SNAPSHOT_REALTIME_VOLUME", "250000"))  # $ per event

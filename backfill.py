@@ -21,8 +21,8 @@ from collector import (CLOB, KALSHI, get, insert, kalshi_record, load_versions, 
                        poly_record, run_job, version_rows, when)
 from graph_build import EXCLUDE_REGEX, GRAPH_SOURCES, scope
 
-KALSHI_CATEGORIES = GRAPH_SOURCES["kalshi_core"] | GRAPH_SOURCES["kalshi_scoped"]
-POLY_TAGS = sorted(GRAPH_SOURCES["poly_core"] | GRAPH_SOURCES["poly_scoped"])
+KALSHI_CATEGORIES = GRAPH_SOURCES["kalshi_core"] | GRAPH_SOURCES["kalshi_scoped"] | GRAPH_SOURCES["kalshi_company"]
+POLY_TAGS = sorted(GRAPH_SOURCES["poly_core"] | GRAPH_SOURCES["poly_scoped"] | GRAPH_SOURCES["poly_company"])
 
 MIN_VOLUME = float(os.getenv("BACKFILL_MIN_VOLUME", "1000"))
 HOUR = 3600
@@ -151,7 +151,8 @@ def backfill(con, run_id, errors, stats):
                      and (venue, r["market_id"]) not in done and not EXCLUDE_REGEX.search(r["text"])]
             questions = {(r["venue"], r["market_id"]): matching.question_text(r["contract"]) for r, _ in cands}
             tags = {(r["venue"], r["market_id"]): r["contract"]["tags"] or [] for r, _ in cands}
-            keep, _ = entities.discover(con, questions, in_scope=scope(questions, tags))
+            full = {(r["venue"], r["market_id"]): r["text"] for r, _ in cands}
+            keep, _ = entities.discover(con, questions, in_scope=scope(questions, tags, full))
             scoped = [(r, h) for r, h in cands if (r["venue"], r["market_id"]) in keep]
         except Exception as err:
             log.exception("%s discovery failed", venue); errors.append(f"{venue} discovery: {err!r}")

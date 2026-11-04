@@ -210,7 +210,7 @@ def estimate(g, cur, jump, since):
             for q, v in g.exposures_of(iss).items():
                 if v["score"] >= MIN_STRUCTURAL_SCORE: structural[q].update(ts)
     sector = defaultdict(set)  # question -> sector ETFs it is linked to
-    for q, links in factors.SECTOR_LINKS.items():
+    for q, links in factors.sector_links(g).items():
         if q in g.nodes: sector[q].update(factors.SECTORS[c]["etf"] for c in links if factors.SECTORS[c]["etf"] in S)
     rows = []
     for q in set(qf) | set(structural) | set(sector):
