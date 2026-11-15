@@ -1,8 +1,7 @@
 name: collect_markets_and_update_graph
 
 on:
-  schedule:
-    - cron: "7,22,37,52 * * * *"   # UTC; GitHub may delay runs
+   # scheduled runs disabled in V2
   workflow_dispatch:          # manual "Run workflow" button
 
 concurrency:
