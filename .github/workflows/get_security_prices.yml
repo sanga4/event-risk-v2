@@ -1,8 +1,7 @@
 name: get_security_prices
 
 on:
-  schedule:
-    - cron: "30 22 * * 1-5"   # UTC, after the US close; Asian closes from the same day are final by then
+   # scheduled runs disabled in V2
   workflow_dispatch:
 
 concurrency:
