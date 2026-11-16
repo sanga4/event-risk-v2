@@ -10,21 +10,25 @@ records their terms in market_versions. Re-runnable: markets already backfilled 
               in 14-day windows (the API's max range at hourly fidelity)
 
 Markets with lifetime volume < BACKFILL_MIN_VOLUME are skipped (too thin for event betas).
+--leadership restricts recovery to leadership contracts, active or settled within
+LEADERSHIP_LOOKBACK_DAYS (default 30), so daily recovery stays bounded.
 """
-import os, sys, time
+import argparse, os, sys, time
+from functools import partial
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import entities, matching
 from collector import (CLOB, KALSHI, get, insert, kalshi_record, load_versions, log, now, num, poly_events,
-                       poly_record, run_job, version_rows, when)
+                       poly_record, run_job, version_rows, when, kalshi_resolution, poly_resolution)
 from graph_build import EXCLUDE_REGEX, GRAPH_SOURCES, scope
 
 KALSHI_CATEGORIES = GRAPH_SOURCES["kalshi_core"] | GRAPH_SOURCES["kalshi_scoped"] | GRAPH_SOURCES["kalshi_company"]
 POLY_TAGS = sorted(GRAPH_SOURCES["poly_core"] | GRAPH_SOURCES["poly_scoped"] | GRAPH_SOURCES["poly_company"])
 
 MIN_VOLUME = float(os.getenv("BACKFILL_MIN_VOLUME", "1000"))
+LEADERSHIP_LOOKBACK_DAYS = int(os.getenv("LEADERSHIP_LOOKBACK_DAYS", "30"))
 HOUR = 3600
 KALSHI_MAX_CANDLES = 5000   # per request
 POLY_WINDOW = 14 * 86400    # max startTs..endTs span at hourly fidelity
@@ -56,25 +60,38 @@ def series_events(ticker):
 
 SKIPPED_SERIES = []
 
-def kalshi_markets(con):
+def kalshi_markets(con, leadership_only=False):
     """(record, is_historical) for every market in KALSHI_CATEGORIES series, any status."""
-    series = [s["ticker"] for c in KALSHI_CATEGORIES
-              for s in get(f"{KALSHI}/series", dict(category=c)).get("series") or []]
+    series = {s["ticker"]: c for c in KALSHI_CATEGORIES
+              for s in get(f"{KALSHI}/series", dict(category=c)).get("series") or []
+              if (not leadership_only and c != "Financials") or matching.company_leadership(
+                  " ".join([s.get("title") or "", *s.get("tags", [])]))}
     with ThreadPoolExecutor(KALSHI_WORKERS) as ex:
         events = [(e, now()) for es in ex.map(series_events, series) for e in es]
+    for e, _ in events:
+        if not e.get("category"): e["category"] = series.get(e.get("series_ticker"))
     if SKIPPED_SERIES: log.warning("%d kalshi series skipped after retries", len(SKIPPED_SERIES))
-    yield from ((kalshi_record(e, m, ts), False) for e, ts in events for m in e.get("markets") or [])
+    def rec(e, m, ts):
+        return kalshi_record(e, m, ts) | {"resolution": kalshi_resolution(m)}
+    yield from ((rec(e, m, ts), False) for e, ts in events for m in e.get("markets") or [])
 
     # Old settled markets are only served by /historical, one request per event: fetch them only
     # for in-scope events (judged on the event title, before any market is fetched).
     empty = {("kalshi", e["event_ticker"]): (e, ts) for e, ts in events if not e.get("markets")}
     titles = {k: " ".join(filter(None, (e.get("title"), e.get("sub_title")))) for k, (e, _) in empty.items()}
-    keep, _ = entities.discover(con, titles, in_scope=scope(titles))
+    tags = {k: [e.get("category")] for k, (e, _) in empty.items()}
+    full = {k: titles[k] + " " + " ".join(t for t in tags[k] if t) for k in titles}
+    keep, _ = entities.discover(con, titles, in_scope=scope(titles, tags, full))
+    # Recently settled markets can be absent from nested events but still live on /markets.
+    def settled(k):
+        regular = tolerant("event", k[1], lambda: paged(f"{KALSHI}/markets", "markets", event_ticker=k[1]))
+        if regular: return regular, False
+        return tolerant("historical event", k[1], lambda: paged(f"{KALSHI}/historical/markets", "markets", event_ticker=k[1])), True
     with ThreadPoolExecutor(KALSHI_WORKERS) as ex:
-        hist = ex.map(lambda k: tolerant("event", k[1], lambda: paged(f"{KALSHI}/historical/markets", "markets", event_ticker=k[1])), keep)
-        for k, ms in zip(keep, hist):
+        hist = ex.map(settled, keep)
+        for k, (ms, historical) in zip(keep, hist):
             e, ts = empty[k]
-            yield from ((kalshi_record(e, m, ts), True) for m in ms)
+            yield from ((rec(e, m, ts), historical) for m in ms)
 
 def dollars(d, k):  # live candles use "<k>_dollars", historical ones plain "<k>"
     d = d or {}
@@ -111,15 +128,27 @@ def kalshi_history(rec, hist):
     return rows
 
 # ── Polymarket ────────────────────────────────────────────────────────────────
-def poly_markets(con):
+def poly_markets(con, leadership_only=False):
     seen = set()
-    for tag in POLY_TAGS:
+    # Recover already collected leadership events even when the venue omits its CEO tag.
+    if leadership_only:
+        rows = con.execute("""SELECT event_id, event_title, title, subtitle, tags::VARCHAR FROM v_market_latest
+                              WHERE venue = 'polymarket' AND regexp_matches(lower(concat_ws(' ', event_title, title, subtitle, tags::VARCHAR)),
+                              'ceo|cfo|coo|cto|chief|board|executive|rejoin|reinstat')""").fetchall()
+        ids = sorted({str(e) for e, *parts in rows if matching.company_leadership(" ".join(str(p or "") for p in parts))})
+        for eid in ids:
+            e = get(f"https://gamma-api.polymarket.com/events/{eid}")
+            for m in e.get("markets") or []:
+                if m["id"] not in seen:
+                    seen.add(m["id"])
+                    yield poly_record(e, m, now()) | {"resolution": poly_resolution(m)}, False
+    for tag in (["ceo"] if leadership_only else POLY_TAGS):
         for closed in ("false", "true"):
             for e, ts in poly_events(tag, closed):
                 for m in e.get("markets") or []:
                     if m["id"] not in seen:
                         seen.add(m["id"])
-                        yield poly_record(e, m, ts), False
+                        yield poly_record(e, m, ts) | {"resolution": poly_resolution(m)}, False
 
 def poly_history(rec, _):
     c = rec["contract"]
@@ -141,14 +170,23 @@ def poly_history(rec, _):
 # ── run ───────────────────────────────────────────────────────────────────────
 VENUES = (("kalshi", kalshi_markets, kalshi_history), ("polymarket", poly_markets, poly_history))
 
-def backfill(con, run_id, errors, stats):
+def backfill(con, run_id, errors, stats, leadership_only=False):
+    stats |= dict(leadership_only=leadership_only, leadership_lookback_days=LEADERSHIP_LOOKBACK_DAYS if leadership_only else None)
     done = set(con.execute("SELECT DISTINCT venue, market_id FROM market_snapshots "
                            "WHERE source = 'backfill'").fetchall())
     versions, todo = load_versions(con), []
+    resolved = set(con.execute("SELECT venue, market_id FROM market_resolutions").fetchall())
     for venue, discover, history in VENUES:
         try:  # liquid, not yet backfilled, then in scope (entity lookups only for these)
-            cands = [(r, h) for r, h in discover(con) if (r["volume"] or 0) >= MIN_VOLUME
+            cands = [(r, h) for r, h in discover(con, leadership_only=leadership_only) if (r["volume"] or 0) >= MIN_VOLUME
                      and (venue, r["market_id"]) not in done and not EXCLUDE_REGEX.search(r["text"])]
+            if leadership_only:
+                cutoff = now() - timedelta(days=LEADERSHIP_LOOKBACK_DAYS)
+                def recent(r):
+                    resolved_at = (r.get("resolution") or {}).get("resolved_at")
+                    ended = resolved_at or when(r["contract"].get("close_time"))
+                    return r["status"] == "active" or not ended or ended >= cutoff
+                cands = [(r, h) for r, h in cands if matching.company_leadership(r["text"]) and recent(r)]
             questions = {(r["venue"], r["market_id"]): matching.question_text(r["contract"]) for r, _ in cands}
             tags = {(r["venue"], r["market_id"]): r["contract"]["tags"] or [] for r, _ in cands}
             full = {(r["venue"], r["market_id"]): r["text"] for r, _ in cands}
@@ -158,9 +196,11 @@ def backfill(con, run_id, errors, stats):
             log.exception("%s discovery failed", venue); errors.append(f"{venue} discovery: {err!r}")
             continue
         vers = version_rows([r for r, _ in scoped], versions, run_id)
-        con.begin(); insert(con, "market_versions", vers); con.commit()
+        resolutions = [dict(r["resolution"], observed_at=now(), run_id=run_id) for r, _ in scoped
+                       if r.get("resolution") and (r["venue"], r["market_id"]) not in resolved]
+        con.begin(); insert(con, "market_versions", vers); insert(con, "market_resolutions", resolutions); con.commit()
         todo += [(r, h, history) for r, h in scoped]
-        stats[venue] = dict(candidates=len(cands), in_scope=len(scoped), new_versions=len(vers))
+        stats[venue] = dict(candidates=len(cands), in_scope=len(scoped), new_versions=len(vers), resolutions=len(resolutions))
         log.info("%s: %s", venue, stats[venue])
 
     def one(item):
@@ -185,4 +225,7 @@ def backfill(con, run_id, errors, stats):
     return n_failed < len(todo) or not todo
 
 if __name__ == "__main__":
-    sys.exit(run_job("backfill", backfill))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--leadership", action="store_true", help="Recover only company leadership history, including settled contracts")
+    args = parser.parse_args()
+    sys.exit(run_job("backfill", partial(backfill, leadership_only=args.leadership)))

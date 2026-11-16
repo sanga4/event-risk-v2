@@ -1874,17 +1874,18 @@ const IssuerBoard = Board({
   empty: "Choose an issuer above.", none: "No live events measured for this issuer.",
   key: d => d.issuer.id, group: x => x.sector || "Other", label: x => `${x.name}${x.ticker ? ` (${x.ticker})` : ""}`,
   search: x => `${x.name} ${x.ticker || ""} ${x.sector || ""}`, initial: items => (items.find(x => x.ticker === "AAPL") || items[0] || {}).id,
-  detail: id => `/dashboard/issuers/${encodeURIComponent(id)}`, events: d => d.events, part: (d, p) => p === "main" ? d.events : d.statistical,
+  detail: id => `/dashboard/issuers/${encodeURIComponent(id)}`, events: d => d.events, part: (d, p) => p === "main" ? d.events : p === "leadership" ? d.leadership : d.statistical,
   move: e => e.move, unit: () => "%", digits: 2, whyHead: "Channel",
   moveHead: d => `${(d.security || {}).ticker || "Stock"} /10 pts`, moveTitle: d => `${(d.security || {}).ticker || "The stock"}'s % move per +10 pts of the event's probability (measured, shrunk)`,
-  why: e => esc(e.move.channels.length ? e.move.channels.map(c => ({ factors: "factors", entity: "entity path", sector: "sector", analyst: "analyst", company: "company market" })[c] || c).join(" · ") : `stat. only · ${EvUI.qtxt(e.move.q)}`),
+  why: e => !e.move ? `company leadership · unmeasured${e.status === "closed" ? " · closed" : ""}` : esc(e.move.channels.length ? e.move.channels.map(c => ({ factors: "factors", entity: "entity path", sector: "sector", analyst: "analyst", company: "company market" })[c] || c).join(" · ") : `stat. only · ${EvUI.qtxt(e.move.q)}`),
   head: d => { const i = d.issuer, s = d.security || {}, c = d.coverage;
     return `<div class="bd-head"><h3>${esc(i.name)} <span class="tag">${esc(s.ticker || "no security")}</span></h3>
       <div class="gx-sub">${esc(i.sector || "")}${i.sub_industry ? ` · ${esc(i.sub_industry)}` : ""}${i.country ? ` · ${esc(i.country)}` : ""}${i.index ? ` · ${esc(i.index)}` : ""}${d.market_beta != null ? ` · market beta ${EvUI.fmt(d.market_beta, 2)}` : ""}</div>
       <div class="gx-sub">Measured against ${c.n_evaluated.toLocaleString()} events (${c.n_live_with_channel.toLocaleString()} live with a channel, ${c.n_live_statistical.toLocaleString()} live statistical-only) of ${c.n_live_total.toLocaleString()} live events in the graph. ${esc(c.note)}${c.run ? ` Run ${esc(c.run.computed_at.slice(0, 10))}.` : ""}</div></div>
       <h4>Top ${d.events.length} events with an economic channel</h4>`; },
-  extra: (d, table) => `<h4>Strongest statistical-only associations <span class="ev estimated" title="No factor, entity, sector or analyst link: possibly spurious">possibly spurious</span></h4>${table(d.statistical, "stat")}`,
+  extra: (d, table) => `${(d.leadership || []).length ? `<h4>Company leadership contracts (${d.leadership_count})</h4><p class="note">Direct company links, including closed contracts. “n/m” means insufficient evidence for a stock estimate; a leadership change alone does not imply a positive or negative return.</p>${table(d.leadership, "leadership")}` : ""}<h4>Strongest statistical-only associations <span class="ev estimated" title="No factor, entity, sector or analyst link: possibly spurious">possibly spurious</span></h4>${table(d.statistical, "stat")}`,
   detailHtml: (d, e, part) => { const m = e.move, t = (d.security || {}).ticker;
+    if (!m) return `${EvUI.eventHead(`${d.issuer.name} · leadership contract`, e)}<p class="note">${esc(e.link_note)}. No numerical impact or return direction is assumed. Status: ${esc(e.status)}.</p><div class="rs-actions"><button data-ev-explore="${esc(e.id)}">Open contract and price history in Explore</button></div>`;
     return `${EvUI.eventHead(`${d.issuer.name} · event`, e)}
       <h3>How ${esc(t)} moves with this event</h3>
       <div class="row">${EvUI.ev("estimated", EvUI.EST)}${EvUI.moveTiles(m, t)}

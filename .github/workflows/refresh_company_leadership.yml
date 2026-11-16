@@ -1,0 +1,53 @@
+name: refresh_company_leadership
+
+on:
+  schedule:
+    - cron: "10 21 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "matching.py"
+      - "graph_build.py"
+      - "backfill.py"
+      - "tests/test_company_leadership.py"
+      - ".github/workflows/refresh_company_leadership.yml"
+  workflow_dispatch:
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: graph
+      cancel-in-progress: false
+    env:
+      DB: md:geo_odds_v2
+      MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest httpx
+      - run: python -m pytest tests -q
+      - run: python backfill.py --leadership
+      - run: python graph_build.py
+  models:
+    needs: recover
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: get_security_prices
+      cancel-in-progress: false
+    env:
+      DB: md:geo_odds_v2
+      MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python factor_betas.py
+      - run: python security_betas.py
+      - run: python event_betas.py

@@ -191,6 +191,7 @@ class Graph:
                 a = x["attrs"] or {}
                 paths[x["src"]].append(dict(strength=x["weight"], sign=x["sign"], channel=a.get("channel"), role="company",
                                             nodes=[x["src"], sec]))
+        direct = set(paths)
         for x in self.inc[sec]:
             if x["type"] != "exposure": continue
             held, responds = x["src"], (x["attrs"] or {}).get("channel_signs") or {}
@@ -200,6 +201,8 @@ class Graph:
                 if passed <= 0: continue
                 for inv in self.inc[ent]:
                     if inv["type"] != "involves": continue
+                    if inv["src"] in direct and ent == held == "wd:" + sec.removeprefix("iss:"):
+                        continue  # issuer-as-entity and direct company link describe the same exposure
                     a = inv["attrs"] or {}
                     strength = (inv["weight"] or 0) * passed * (x["weight"] or 0)
                     if strength <= 0: continue
@@ -1315,6 +1318,32 @@ def primary_security(g, iid):
     secs = securities_of(g, iid)
     return next((s for s in secs if s["primary"]), secs[0] if secs else None)
 
+def issuer_leadership_rows(cur, g, iid, ticker, at, measured):
+    """Direct leadership contracts stay visible even without an estimate or a top-50 ranking.
+    Include closed contracts for historical research; no assumed stock-return sign or beta."""
+    qs = sorted({e["src"] for e in g.inc[iid] if e["type"] == "about"
+                 and (e["attrs"] or {}).get("channel") == "governance"})
+    if not qs: return []
+    qp, changes = with_changes(cur, g, qs, at)
+    dense = {r["id"]: r for r in measured}
+    out = []
+    for q in qs:
+        if q in dense:
+            row = dict(dense[q])
+            row["move"] = dict(row["move"], channels=list(dict.fromkeys(row["move"]["channels"] + ["company"])))
+        else:
+            p = qp[q]["prob"]
+            b = g.sec_betas.get((q, ticker)) if ticker else None
+            move = sec_sensitivity(b, p) if b else None
+            if move: move.update(channels=["company"], q=None)
+            row = dict(question_summary(g, q, qp), **changes[q], move=move,
+                       risk=risk(move["beta"], p) if move else None, lead_factor=None)
+        row["link_note"] = "Direct company leadership contract" + (
+            "; insufficient probability-jump/price history for a stock estimate" if row["move"] is None else "; estimated from prices")
+        row["repricing_24h"] = repricing(row["move"], row)
+        out.append(row)
+    return sorted(out, key=lambda r: (r["status"] != "live", -(r.get("volume_24h") or 0)))
+
 @app.get("/dashboard/issuers")
 def dashboard_issuers(cur=Depends(db)):
     """Every issuer (the S&P 500 plus the non-index borrowers in issuers.csv) for the Issuer dashboard
@@ -1356,6 +1385,7 @@ def dashboard_issuer(issuer_id: str, limit: int = Query(20, ge=1, le=50), rank: 
     ev = event_rows(cur, g, rows, at, issuer_move(s["ticker"] if s else None),
                     lambda r, p: dict(lead_factor=lead_factor(g, r["question_id"], s["ticker"], r, p)))
     for e in ev: e["repricing_24h"] = repricing(e["move"], e)
+    leadership = issuer_leadership_rows(cur, g, i, s["ticker"] if s else None, at, ev)
     move = lambda e: e["move"]
     chan, stat = [e for e in ev if e["move"]["channels"]], [e for e in ev if not e["move"]["channels"]]
     n_chan = next((r["n_live"] for r in rows if r["channels"]), 0)
@@ -1370,6 +1400,8 @@ def dashboard_issuer(issuer_id: str, limit: int = Query(20, ge=1, le=50), rank: 
                 ranked_by=rank, ranking=dict(ranking_info(rank, chan, move, n_live=n_chan, complete=len(chan) >= n_chan),
                                              statistical=ranking_info(rank, stat, move, n_live=n_stat, complete=len(stat) >= n_stat),
                                              pool="stored event_betas.py rows (top 50 live per issuer and list by |move|)"),
+                leadership=rank_rows(leadership, rank, move)[:limit],
+                leadership_count=len(leadership),
                 events=rank_rows(chan, rank, move)[:limit], statistical=rank_rows(stat, rank, move)[:10])
 
 def measured_by(f):

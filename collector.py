@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb, pyarrow as pa, requests
+from matching import company_leadership
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -132,6 +133,12 @@ def kalshi_record(e, m, ts):
     return record("kalshi", m["ticker"], m.get("status"), ts, contract, quote,
                   num(m.get("volume_fp") or m.get("volume")), text)
 
+def kalshi_keep(e):
+    """Keep corporate leadership even when the venue files it under Financials."""
+    cat = e.get("category")
+    text = " ".join(filter(None, (e.get("title"), e.get("sub_title"))))
+    return bool(cat and (cat not in KALSHI_EXCLUDE or (cat == "Financials" and company_leadership(text))))
+
 def kalshi_sweep():
     """All open events outside KALSHI_EXCLUDE. One global pass is cheaper than per-series calls."""
     cursor = None
@@ -140,11 +147,12 @@ def kalshi_sweep():
         d = get(f"{KALSHI}/events", dict(status="open", with_nested_markets="true",
                                          limit=200, cursor=cursor))
         for e in d.get("events") or []:
-            if (cat := e.get("category")) and cat not in KALSHI_EXCLUDE:
+            if kalshi_keep(e):
+                cat = e.get("category")
                 recs = [kalshi_record(e, m, ts) for m in e.get("markets") or []]
                 total = sum(r["volume"] or 0 for r in recs)
                 for r in recs:
-                    yield r | dict(event_volume=total, core=cat in KALSHI_REALTIME)
+                    yield r | dict(event_volume=total, core=cat in KALSHI_REALTIME or company_leadership(r["text"]))
         if not (cursor := d.get("cursor")): return
 
 # ── Polymarket ────────────────────────────────────────────────────────────────
@@ -191,7 +199,8 @@ def poly_events(tag, closed, exclude=()):
 
 def poly_keep(e):
     tags = {t.get("slug") for t in e.get("tags") or []}
-    return bool(tags & POLY_KEEP_TAGS) or not tags & POLY_EXCLUDE_TAGS
+    text = " ".join([e.get("title") or "", *sorted(t for t in tags if t)])
+    return company_leadership(text) or bool(tags & POLY_KEEP_TAGS) or not tags & POLY_EXCLUDE_TAGS
 
 def poly_sweep():
     """Every open event that poly_keep() accepts."""
@@ -202,7 +211,8 @@ def poly_sweep():
         for m in e.get("markets") or []:
             if m["id"] not in seen:
                 seen.add(m["id"])
-                yield poly_record(e, m, ts) | dict(event_volume=num(e.get("volume")), core=core)
+                r = poly_record(e, m, ts)
+                yield r | dict(event_volume=num(e.get("volume")), core=core or company_leadership(r["text"]))
 
 def poly_oi(recs):
     """Priced gross OI in USDC from Data API v2 (v1 retired 2026-11-02).

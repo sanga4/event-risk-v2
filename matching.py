@@ -120,7 +120,25 @@ ACTIONS = [(a, FAMILY.get(a, a), k, s, re.compile(p, re.I)) for a, k, s, p in [
 ]]
 # Company markets (earnings and company KPIs: graph_build's company sources) are read with this
 # vocabulary first, then ACTIONS; other markets never see it, so "tariff revenue" stays a tariff.
+LEADERSHIP_ROLE = re.compile(r"\b(?:ceos?|cfos?|coos?|ctos?|chief executive|chief financial|chief operating|chief technology|board|executives?)\b", re.I)
+LEADERSHIP_EVENT = re.compile(r"\b(?:leav\w*|resign\w*|remov\w*|depart\w*|oust\w*|fir(?:e|ed|ing)|step\w* down|next|appoint\w*|replac\w*|stay\w*|remain\w*|still|rejoin\w*|return\w*|reinstat\w*)\b", re.I)
+LEADERSHIP_RETURN = re.compile(r"\b(?:rejoin\w*|reinstat\w*)\b", re.I)
+
+def company_leadership(text):
+    """Corporate role change, not a share-price range or a personality's unrelated news.
+    A rejoining question may omit the role; scope still requires a named issuer."""
+    return bool((LEADERSHIP_ROLE.search(text or "") and LEADERSHIP_EVENT.search(text or ""))
+                or LEADERSHIP_RETURN.search(text or ""))
+
+LEADERSHIP_ACTIONS = {"leadership_announcement", "leadership_departure", "leadership_return",
+                      "leadership_appointment", "leadership_tenure"}
 COMPANY_ACTIONS = [(a, a, k, False, re.compile(p, re.I)) for a, k, p in [
+    # Announcement and actual departure have different resolution conditions; never blend them.
+    ("leadership_announcement", "occurrence", r"\bannounc\w*\b.{0,100}\b(?:resign\w*|remov\w*|depart\w*|leav\w*|step\w* down)\b"),
+    ("leadership_return", "occurrence", r"\brejoin\w*|\breinstat\w*|\breturn\w*.*\b(?:ceo|board|executive)\b"),
+    ("leadership_departure", "occurrence", r"\bresign\w*|\bremov\w*|\bdepart\w*|\bleav\w*|\boust\w*|\bstep\w* down\b"),
+    ("leadership_tenure", "occurrence", r"\b(?:stay\w*|remain\w*|still)\b.*\b(?:ceo|cfo|coo|cto|board|chief executive)\b"),
+    ("leadership_appointment", "race", r"\b(?:next|new)\s+(?:permanent\s+)?(?:ceo|cfo|coo|cto|chief executive)\b|\bappoint\w*.*\b(?:ceo|board|executive)\b"),
     ("earnings_beat", "measure", r"\bbeat\b.*\bearnings\b|earnings (?:beat|surprise)|\bEPS\b|earnings per share"),
     ("acquisition", "occurrence", r"\bacquir|\bacquisition|\bmerger\b|\bbuyout\b"),
     ("ipo", "occurrence", r"\bIPO\b|\bgo(?:es|ing)? public\b|\btake \w+ public\b"),
@@ -195,6 +213,8 @@ EFFECTS = {
     "acquisition":     ("corporate",   0.5, +1, 0),      # the acquired company gets a premium
     "ipo":             ("corporate",   0.3, 0, 0),
     "layoffs":         ("corporate",   0.3, 0, 0),
+    # A departure/appointment is relevant, but its stock-return sign must be measured.
+    **{a: ("governance", 0.8, 0, 0) for a in LEADERSHIP_ACTIONS},
 }
 UNKNOWN_EFFECT = (None, 0.3, 0, 0)   # unparsed or unlisted actions: some relevance, no direction
 FLIP_BELOW = {"tariff_rate", "transit", "company_metric"}
@@ -375,6 +395,7 @@ def find_action(question, head, company=False):
     COMPANY_ACTIONS first."""
     for src in (question, head):
         for a, f, k, s, rx in (COMPANY_ACTIONS + ACTIONS if company else ACTIONS):
+            if a in LEADERSHIP_ACTIONS and not company_leadership(question + " " + head): continue
             if src is not question and a in QUESTION_ONLY: continue
             if verb := rx.search(src):
                 return a, f, k, s, verb if src is question else None

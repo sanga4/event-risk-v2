@@ -12,6 +12,7 @@ moves with a factor or question is measured from prices (`security_betas.py`), n
 | `collector.py` + `graph_build.py` | `collect_markets_and_update_graph` | every 15 min, relevant pushes, or manual | `market_versions` (every non-excluded market), `market_snapshots` (realtime / hourly / daily by event volume), `market_resolutions`; graph only when its candidate markets change |
 | `prices.py` + `factor_betas.py` + `security_betas.py` + `event_betas.py` | `get_security_prices` | weekdays 22:30 UTC, relevant pushes, or manual | `security_prices` (Yahoo, research use), `factor_prices` (Yahoo + FRED), `factor_betas`, `security_loadings`, `security_betas`, `issuer_event_betas`, `factor_event_betas` |
 | `backfill.py` | `backfill_market_history` | manual, one-time | `market_snapshots` (source=`backfill`) |
+| `backfill.py --leadership` → graph → beta jobs | `refresh_company_leadership` | daily 21:10 UTC, relevant pushes, or manual | leadership history/resolutions, graph and measured sensitivities |
 | `graph_build.py --refresh …` | `refresh_wikipedia_facts` | manual | re-fetched Wikipedia/Wikidata facts, then graph |
 | `issuers.py` | — (run locally) | after index rebalances | `issuers.csv` + `securities.csv` (S&P 500 from Wikipedia + hand-written rows; review and commit) |
 | `backtest.py` | — (run locally) | after graph or price changes | nothing; prints whether exposure priors predict returns when odds jump |
@@ -37,7 +38,7 @@ MOTHERDUCK_TOKEN=<your MotherDuck token with write access to geo_odds_v2>
 ```
 
 Real environment variables override `.env`. Restart the API after changing its database.
-All four GitHub workflows target `md:geo_odds_v2`; their `MOTHERDUCK_TOKEN` repository
+All ingestion workflows target `md:geo_odds_v2`; their `MOTHERDUCK_TOKEN` repository
 secret must grant access to that database. For a separate Railway V2 service, set its
 `DB=md:geo_odds_v2` and a token with access to the copy. Push changes to `main` to update GitHub and deploy the connected Railway V2 service.
 
@@ -54,6 +55,21 @@ conditions per request. It reports priced gross open interest in USDC. Each coll
 run records requested/received/missing counts in `stats.polymarket_oi`; zero is retained
 as zero, while unavailable markets remain NULL. The retired v1 `/oi` endpoint caused
 an open-interest gap in the first live V2 run; those historical rows remain unchanged.
+
+Company leadership contracts (departures, departure announcements, appointments, staying
+and rejoining) are also covered. Kalshi's Financials exclusion has a narrow leadership
+exception; Polymarket Business/Tech/CEO sources pass a leadership scope test. Issuer
+names match without case sensitivity. Leadership contracts are snapshotted every run,
+and `refresh_company_leadership` at 21:10 UTC daily recovers missed/settled history
+(`python backfill.py --leadership`), rebuilds the graph, then refreshes models.
+Recently settled Kalshi contracts are checked on `/markets` before the historical API.
+Daily recovery covers active contracts and settlements within the last 30 days;
+`LEADERSHIP_LOOKBACK_DAYS` can widen that recovery window.
+
+The Issuer Dashboard has a **Company leadership contracts** section independent of its
+top-50 measured-event pool. Contracts without enough price/jump history show **n/m**;
+no stock-return sign is assumed from a CEO leaving or joining. Announcing a departure
+and actually departing remain different propositions because their rules differ.
 
 ## API
 
