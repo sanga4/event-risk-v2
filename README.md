@@ -20,6 +20,10 @@ All data lives in MotherDuck: put `MOTHERDUCK_TOKEN` in `.env` (copy `.env.examp
 
 ## V2 database
 
+The V2 explorer is deployed at https://web-production-ae0bff99.up.railway.app/ from
+`sanga4/event-risk-v2` on `main`. Its Railway `DB` is `md:geo_odds_v2` and the existing
+API-key requirement still applies to data requests.
+
 V2 uses its own writable MotherDuck database, `geo_odds_v2`, copied from the attached
 `geo_odds` share on 2026-11-15. The copy preserves existing market history, graph data,
 Wikipedia cache and model outputs. Changes and new collection runs in V2 are independent
@@ -44,6 +48,10 @@ the application's views and graph macros in the copy. Backfill remains
 manual. Collection runs every 15 minutes and pricing runs weekdays at
 22:30 UTC. Relevant code pushes also trigger their pipelines. Editing collection rules
 changes future runs, not already stored rows.
+
+The first live V2 collection saved 80,409 market snapshots. Polymarket's `/oi` endpoint
+returned HTTP 410, so that run is recorded as partial: its new Polymarket snapshots
+have no open interest. Other market data was saved and the graph job continued.
 
 ## API
 
