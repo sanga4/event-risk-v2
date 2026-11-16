@@ -65,7 +65,7 @@ def kalshi_markets(con, leadership_only=False):
     series = {s["ticker"]: c for c in KALSHI_CATEGORIES
               for s in get(f"{KALSHI}/series", dict(category=c)).get("series") or []
               if (not leadership_only and c != "Financials") or matching.company_leadership(
-                  " ".join([s.get("title") or "", *s.get("tags", [])]))}
+                  " ".join([s.get("title") or "", *(s.get("tags") or [])]))}
     with ThreadPoolExecutor(KALSHI_WORKERS) as ex:
         events = [(e, now()) for es in ex.map(series_events, series) for e in es]
     for e, _ in events:
@@ -174,7 +174,7 @@ def backfill(con, run_id, errors, stats, leadership_only=False):
     stats |= dict(leadership_only=leadership_only, leadership_lookback_days=LEADERSHIP_LOOKBACK_DAYS if leadership_only else None)
     done = set(con.execute("SELECT DISTINCT venue, market_id FROM market_snapshots "
                            "WHERE source = 'backfill'").fetchall())
-    versions, todo = load_versions(con), []
+    versions, todo, discovery_failures = load_versions(con), [], []
     resolved = set(con.execute("SELECT venue, market_id FROM market_resolutions").fetchall())
     for venue, discover, history in VENUES:
         try:  # liquid, not yet backfilled, then in scope (entity lookups only for these)
@@ -193,6 +193,7 @@ def backfill(con, run_id, errors, stats, leadership_only=False):
             keep, _ = entities.discover(con, questions, in_scope=scope(questions, tags, full))
             scoped = [(r, h) for r, h in cands if (r["venue"], r["market_id"]) in keep]
         except Exception as err:
+            discovery_failures.append(venue)
             log.exception("%s discovery failed", venue); errors.append(f"{venue} discovery: {err!r}")
             continue
         vers = version_rows([r for r, _ in scoped], versions, run_id)
@@ -221,8 +222,9 @@ def backfill(con, run_id, errors, stats, leadership_only=False):
                 con.begin(); insert(con, "market_snapshots", batch); con.commit()
                 n_rows += len(batch); batch = []
                 log.info("%d/%d markets, %d rows", i, len(todo), n_rows)
-    stats |= {"rows": n_rows, "failed_markets": n_failed, "kalshi_series_skipped": len(SKIPPED_SERIES)}
-    return n_failed < len(todo) or not todo
+    stats |= {"rows": n_rows, "failed_markets": n_failed, "kalshi_series_skipped": len(SKIPPED_SERIES),
+              "discovery_failures": discovery_failures}
+    return (n_failed < len(todo) or not todo) and (not leadership_only or not discovery_failures)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)

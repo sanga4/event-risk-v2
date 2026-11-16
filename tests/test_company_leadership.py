@@ -2,7 +2,7 @@
 import json
 from collections import defaultdict
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -82,13 +82,14 @@ def test_build_adds_direct_nvidia_issuer_and_security_path_without_wikipedia():
     assert "sec:NVDA" in nodes
 
 
-def test_recently_settled_kalshi_markets_use_regular_endpoint_before_archive():
+@pytest.mark.parametrize("series_tags", [None, []])
+def test_recently_settled_kalshi_markets_use_regular_endpoint_before_archive(series_tags):
     event = dict(event_ticker="KXCEONVDA-E", series_ticker="KXCEONVDA", category="Financials",
                  title="When will Jensen Huang leave as Nvidia CEO?", markets=[])
     market = dict(ticker="KXCEONVDA-E-A", title=event["title"], status="finalized", result="yes", volume_fp="10000")
     def get(url, params=None):
         if url.endswith("/series"):
-            return {"series": [dict(ticker="KXCEONVDA", title="Nvidia CEO leaving")] if params["category"] == "Financials" else []}
+            return {"series": [dict(ticker="KXCEONVDA", title="Nvidia CEO leaving", tags=series_tags)] if params["category"] == "Financials" else []}
         raise AssertionError(url)
     def paged(url, key, **params):
         assert url.endswith("/markets") and "/historical/" not in url
@@ -112,6 +113,21 @@ def test_direct_leadership_listing_includes_unmeasured_contract():
         rows = api.issuer_leadership_rows(None, g, iid, "NVDA", datetime.now(timezone.utc), [])
     assert rows[0]["id"] == q and rows[0]["move"] is None
     assert "insufficient" in rows[0]["link_note"]
+
+
+@pytest.mark.parametrize("leadership_only,expected", [(True, False), (False, True)])
+def test_leadership_recovery_fails_when_a_venue_cannot_be_discovered(leadership_only, expected):
+    def broken(con, **kwargs):
+        raise RuntimeError("venue discovery failed")
+    con = MagicMock()
+    con.execute.return_value.fetchall.return_value = []
+    stats, errors = {}, []
+    venues = (("kalshi", broken, None), ("polymarket", lambda con, **kw: [], None))
+    with patch.object(backfill, "VENUES", venues), patch.object(backfill, "load_versions", return_value={}), \
+         patch.object(backfill.entities, "discover", return_value=({}, {})):
+        result = backfill.backfill(con, "test", errors, stats, leadership_only=leadership_only)
+    assert result is expected
+    assert stats["discovery_failures"] == ["kalshi"] and errors
 
 
 def test_direct_and_issuer_as_entity_paths_do_not_double_count():
