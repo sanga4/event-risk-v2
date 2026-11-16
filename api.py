@@ -1335,7 +1335,7 @@ def issuer_leadership_rows(cur, g, iid, ticker, at, measured):
             p = qp[q]["prob"]
             b = g.sec_betas.get((q, ticker)) if ticker else None
             move = sec_sensitivity(b, p) if b else None
-            if move: move.update(channels=["company"], q=None)
+            if move: move.update(channels=["company"])
             row = dict(question_summary(g, q, qp), **changes[q], move=move,
                        risk=risk(move["beta"], p) if move else None, lead_factor=None)
         row["link_note"] = "Direct company leadership contract" + (
