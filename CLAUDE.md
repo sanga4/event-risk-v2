@@ -1,5 +1,11 @@
 # event_risk — project context
 
+## V2 database isolation (2026-11-15)
+- This checkout defaults to `DB=md:geo_odds_v2` in `collector.py`, `.env.example`, local `.env` and all four GitHub workflows. The source `geo_odds` is an attached read-only share; V2 has an independent writable copy of its existing data. It does not synchronize subsequent changes from the source.
+- A direct clone failed because the source's seven-day snapshot retention is incompatible with the free plan. The copy was created by `CREATE DATABASE geo_odds_v2`, then `COPY FROM DATABASE geo_odds (OVERWRITE) TO geo_odds_v2` while the destination was empty, retaining its free-plan settings. Apply `schema.sql` in V2 to install the application's views and graph macros (macros were absent from the source share).
+- V2 workflow schedules are enabled: collection/graph every 15 minutes; prices and beta jobs weekdays at 22:30 UTC. Relevant pushes to `main` also run the corresponding pipeline. Backfill and Wikipedia refresh remain manual. The older `geo_odds` descriptions below are historical context.
+- Local `.env` is git-ignored and needs a MotherDuck token for this account. Existing process environment variables override `.env`. All workflows target V2; the Railway V2 service must also use `DB=md:geo_odds_v2`. Never publish `.env` or credentials. Wikipedia fetching remains off by default.
+
 ## What this is
 A data product for institutional investors built on prediction-market odds (Kalshi + Polymarket) for geopolitical events. Two value props:
 

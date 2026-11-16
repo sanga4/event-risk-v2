@@ -1,7 +1,22 @@
 name: collect_markets_and_update_graph
 
 on:
-   # scheduled runs disabled in V2
+  schedule:
+    - cron: "*/15 * * * *"
+  push:
+    branches: [main]
+    paths:
+      - "collector.py"
+      - "graph_build.py"
+      - "matching.py"
+      - "entities.py"
+      - "factors.py"
+      - "schema.sql"
+      - "seeds/**"
+      - "issuers.csv"
+      - "securities.csv"
+      - "requirements.txt"
+      - ".github/workflows/collect_markets_and_update_graph.yml"
   workflow_dispatch:          # manual "Run workflow" button
 
 concurrency:
@@ -20,9 +35,9 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python collector.py
         env:
-          DB: md:geo_odds
+          DB: md:geo_odds_v2
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
       - run: python graph_build.py   # diff-only; records nothing when the graph is unchanged
         env:
-          DB: md:geo_odds
+          DB: md:geo_odds_v2
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}

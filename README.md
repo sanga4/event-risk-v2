@@ -9,14 +9,41 @@ moves with a factor or question is measured from prices (`security_betas.py`), n
 
 | Script | Workflow (GitHub Actions) | Schedule | Writes |
 |---|---|---|---|
-| `collector.py` + `graph_build.py` | `collect_markets_and_update_graph` | every 15 min | `market_versions` (every non-excluded market), `market_snapshots` (realtime / hourly / daily by event volume), `market_resolutions`; graph only when its candidate markets change |
-| `prices.py` + `factor_betas.py` + `security_betas.py` | `get_security_prices` | weekdays 22:30 UTC | `security_prices` (Yahoo, research use), `factor_prices` (Yahoo + FRED), `factor_betas`, `security_loadings`, `security_betas` |
+| `collector.py` + `graph_build.py` | `collect_markets_and_update_graph` | every 15 min, relevant pushes, or manual | `market_versions` (every non-excluded market), `market_snapshots` (realtime / hourly / daily by event volume), `market_resolutions`; graph only when its candidate markets change |
+| `prices.py` + `factor_betas.py` + `security_betas.py` + `event_betas.py` | `get_security_prices` | weekdays 22:30 UTC, relevant pushes, or manual | `security_prices` (Yahoo, research use), `factor_prices` (Yahoo + FRED), `factor_betas`, `security_loadings`, `security_betas`, `issuer_event_betas`, `factor_event_betas` |
 | `backfill.py` | `backfill_market_history` | manual, one-time | `market_snapshots` (source=`backfill`) |
 | `graph_build.py --refresh …` | `refresh_wikipedia_facts` | manual | re-fetched Wikipedia/Wikidata facts, then graph |
 | `issuers.py` | — (run locally) | after index rebalances | `issuers.csv` + `securities.csv` (S&P 500 from Wikipedia + hand-written rows; review and commit) |
 | `backtest.py` | — (run locally) | after graph or price changes | nothing; prints whether exposure priors predict returns when odds jump |
 
-All data lives in MotherDuck: put `MOTHERDUCK_TOKEN` in `.env` (copy `.env.example`; git-ignored) or the environment. `DB` defaults to `md:geo_odds`.
+All data lives in MotherDuck: put `MOTHERDUCK_TOKEN` in `.env` (copy `.env.example`; git-ignored) or the environment. `DB` defaults to `md:geo_odds_v2`.
+
+## V2 database
+
+V2 uses its own writable MotherDuck database, `geo_odds_v2`, copied from the attached
+`geo_odds` share on 2026-11-15. The copy preserves existing market history, graph data,
+Wikipedia cache and model outputs. Changes and new collection runs in V2 are independent
+of the original; the copy does not keep synchronizing with the source share.
+
+Local configuration:
+
+```dotenv
+DB=md:geo_odds_v2
+MOTHERDUCK_TOKEN=<your MotherDuck token with write access to geo_odds_v2>
+```
+
+Real environment variables override `.env`. Restart the API after changing its database.
+All four GitHub workflows target `md:geo_odds_v2`; their `MOTHERDUCK_TOKEN` repository
+secret must grant access to that database. For a separate Railway V2 service, set its
+`DB=md:geo_odds_v2` and a token with access to the copy. Push changes to `main` to update GitHub and deploy the connected Railway V2 service.
+
+The initial copy used a new database with the free plan's default retention, then a
+zero-copy overwrite of that empty destination. A direct `CREATE DATABASE ... FROM`
+failed because it inherited the source's seven-day retention. `schema.sql` installs
+the application's views and graph macros in the copy. Backfill remains
+manual. Collection runs every 15 minutes and pricing runs weekdays at
+22:30 UTC. Relevant code pushes also trigger their pipelines. Editing collection rules
+changes future runs, not already stored rows.
 
 ## API
 

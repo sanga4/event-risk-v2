@@ -23,7 +23,7 @@ knowledge graph uses is graph_build's decision (graph_build.GRAPH_SOURCES and sc
 
 backfill.py adds older hourly history (source='backfill'); prices.py loads security prices.
 
-DB: md:geo_odds (default) -> MotherDuck cloud database (needs MOTHERDUCK_TOKEN env var).
+DB: md:geo_odds_v2 (default) -> V2 MotherDuck database (needs MOTHERDUCK_TOKEN env var).
     All data lives in MotherDuck; a local file path works only for throwaway tests.
 """
 import hashlib, json, logging, os, re, sys, uuid
@@ -45,7 +45,7 @@ def load_env(path=Path(__file__).parent / ".env"):
                 os.environ.setdefault(key, value)
 
 load_env()
-DB = os.getenv("DB", "md:geo_odds")
+DB = os.getenv("DB", "md:geo_odds_v2")
 env_set = lambda k, d: {x.strip() for x in os.getenv(k, d).split(",") if x.strip()}
 KALSHI_EXCLUDE = env_set("KALSHI_EXCLUDE", "Sports,Entertainment,Mentions,Social,Crypto,Climate and Weather,Financials")
 POLY_EXCLUDE_TAGS = env_set("POLY_EXCLUDE_TAGS", "sports,esports,games,pop-culture,culture,entertainment,music,movies,"

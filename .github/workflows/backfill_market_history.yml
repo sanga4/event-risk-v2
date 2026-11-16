@@ -19,5 +19,5 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python backfill.py
         env:
-          DB: md:geo_odds
+          DB: md:geo_odds_v2
           MOTHERDUCK_TOKEN: ${{ secrets.MOTHERDUCK_TOKEN }}
