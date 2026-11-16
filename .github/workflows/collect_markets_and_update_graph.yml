@@ -33,6 +33,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -p 'test_collector_oi.py'
       - run: python collector.py
         env:
           DB: md:geo_odds_v2

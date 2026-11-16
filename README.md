@@ -49,9 +49,11 @@ manual. Collection runs every 15 minutes and pricing runs weekdays at
 22:30 UTC. Relevant code pushes also trigger their pipelines. Editing collection rules
 changes future runs, not already stored rows.
 
-The first live V2 collection saved 80,409 market snapshots. Polymarket's `/oi` endpoint
-returned HTTP 410, so that run is recorded as partial: its new Polymarket snapshots
-have no open interest. Other market data was saved and the graph job continued.
+Polymarket open interest uses Data API v2: `/v2/oi?condition=...`, with up to 20
+conditions per request. It reports priced gross open interest in USDC. Each collector
+run records requested/received/missing counts in `stats.polymarket_oi`; zero is retained
+as zero, while unavailable markets remain NULL. The retired v1 `/oi` endpoint caused
+an open-interest gap in the first live V2 run; those historical rows remain unchanged.
 
 ## API
 

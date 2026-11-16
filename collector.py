@@ -205,19 +205,26 @@ def poly_sweep():
                 yield poly_record(e, m, ts) | dict(event_volume=num(e.get("volume")), core=core)
 
 def poly_oi(recs):
-    """Open interest isn't on Gamma; fetch from the Data API. Its WAF sporadically 403s some
-    batches of condition ids, so split a refused batch until it passes (lone refusals are skipped)."""
+    """Priced gross OI in USDC from Data API v2 (v1 retired 2026-11-02).
+    At most 20 distinct conditions per request; data=[] means unavailable, not zero.
+    Split WAF-blocked batches as before; report coverage without filling missing values."""
     by_cond = {r["contract"]["condition_id"]: r for r in recs if r["contract"]["condition_id"]}
     def fetch(batch):
-        try: return get(f"{DATA}/oi", dict(market=",".join(batch)))
+        try:
+            response = get(f"{DATA}/v2/oi", dict(condition=",".join(batch)))
+            if not isinstance(response, dict) or not isinstance(response.get("data"), list):
+                raise ValueError("Polymarket v2 OI response must contain a data array")
+            return response["data"]
         except requests.HTTPError as err:
             if err.response is None or err.response.status_code != 403: raise
             if len(batch) == 1: return []
             return fetch(batch[:len(batch) // 2]) + fetch(batch[len(batch) // 2:])
     for batch in chunks(by_cond, 20):
         for x in fetch(batch):
-            if (r := by_cond.get(x.get("market"))) is not None:
+            if (r := by_cond.get(x.get("condition_id"))) is not None:
                 r["quote"]["open_interest"] = num(x.get("value"))
+    received = sum(r["quote"]["open_interest"] is not None for r in by_cond.values())
+    return dict(requested=len(by_cond), received=received, missing=len(by_cond) - received, units="USDC")
 
 # ── resolutions ───────────────────────────────────────────────────────────────
 def iso(x):
@@ -388,7 +395,7 @@ def collect(con, run_id, errors, stats):
     tiers = due(con, now())
     take = [r for r in live if tier(r) in tiers]
     try:  # open interest is a blend weight for graph markets; daily-tier markets go without
-        poly_oi([r for r in take if r["venue"] == "polymarket" and tier(r) != "daily"])
+        stats["polymarket_oi"] = poly_oi([r for r in take if r["venue"] == "polymarket" and tier(r) != "daily"])
     except Exception as err:
         log.exception("polymarket OI failed"); errors.append(f"polymarket oi: {err!r}")
 
