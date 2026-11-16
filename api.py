@@ -1400,7 +1400,7 @@ def dashboard_issuer(issuer_id: str, limit: int = Query(20, ge=1, le=50), rank: 
                 ranked_by=rank, ranking=dict(ranking_info(rank, chan, move, n_live=n_chan, complete=len(chan) >= n_chan),
                                              statistical=ranking_info(rank, stat, move, n_live=n_stat, complete=len(stat) >= n_stat),
                                              pool="stored event_betas.py rows (top 50 live per issuer and list by |move|)"),
-                leadership=rank_rows(leadership, rank, move)[:limit],
+                leadership=rank_rows(leadership, rank, move),
                 leadership_count=len(leadership),
                 events=rank_rows(chan, rank, move)[:limit], statistical=rank_rows(stat, rank, move)[:10])
 
